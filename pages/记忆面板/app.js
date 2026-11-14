@@ -2070,6 +2070,10 @@ defineView("core", {
           }
           const buckets = { private: [], group: [], profile: [], global: [] };
           list.forEach((memory) => {
+            // Only accepted stable facts may become always-on core memory.
+            // Diary, dream, dialogue and clipped previews are not stable facts.
+            if (memory.lifecycle !== "stable_memory" || !["auto", "manual"].includes(memory.review_status) ||
+                !["assertion", "preference", "profile", "rule"].includes(memory.memory_type)) return;
             const key = compact(memory.scope) || "global";
             (buckets[key] || buckets.global).push(memory);
           });
@@ -2089,17 +2093,18 @@ defineView("core", {
                       if (compact(fact)) facts.push(compact(fact));
                     });
                   } else if (compact(memory.content)) {
-                    facts.push(clip(compact(memory.content), 60));
+                    facts.push(compact(memory.content));
                   }
                 });
-              const unique = Array.from(new Set(facts.filter(Boolean))).slice(0, 8);
+              const unique = Array.from(new Set(facts.filter(Boolean))).slice(0, 8).reduce(
+                (selected, fact) => selected.concat(fact).join("\n").length <= 4000 ? selected.concat(fact) : selected, []);
               if (!unique.length) return null;
               return {
                 label: labels[scope],
                 kind: "fact",
                 scope: scope === "profile" ? "global" : scope,
                 priority: 60,
-                content: unique.join("；"),
+                content: unique.join("\n"),
                 enabled: true,
               };
             })

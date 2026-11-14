@@ -1219,6 +1219,9 @@ class MemoryCompanionService:
         stage_timer.mark("identity")
         capture_runtime = getattr(self, "capture", None)
         if capture_runtime is not None:
+            event._memory_companion_sent_observer = (
+                lambda text, source_id: capture_runtime.sent(ctx, text, source_id)
+            )
             source_receipt = await await_hook_stage(
                 capture_runtime.incoming(event, ctx), "capture_incoming"
             )
@@ -1644,27 +1647,25 @@ class MemoryCompanionService:
         record = self.classifier.from_user_message(ctx)
         if not record:
             return
-        if await self._timeline_already_has_message(ctx, "user_message"):
-            return
-        event_metadata = await self._conversation_memory_metadata(ctx, source="group_conversation_observer")
-        event_metadata.update(
-            {
-                "memory_id": "",
-                "sender_name": ctx.user_name,
-                "message_id": ctx.message_id,
-            }
-        )
-        event_metadata.update(self._cross_window_event_metadata(ctx))
-        event_metadata.update(self._reply_chain_metadata(reply_chain))
-        captured_id = await self.store.add_timeline_event(
-            event_type="user_message",
-            session_id=ctx.session_id,
-            scope=ctx.scope,
-            subject_id=ctx.user_id,
-            object_id=ctx.current_target_id,
-            content=self._timeline_content_with_reply_chain(ctx.message_text, reply_chain),
-            metadata=event_metadata,
-        )
+        capture = getattr(self, "capture", None)
+        receipt = await capture.incoming(event, ctx) if capture is not None else None
+        if receipt is not None:
+            if receipt.get("status") != "committed" or receipt.get("source_state") != "current":
+                return
+            captured_id = receipt["source_ref"].removeprefix("timeline:")
+        else:
+            if await self._timeline_already_has_message(ctx, "user_message"):
+                return
+            event_metadata = await self._conversation_memory_metadata(ctx, source="group_conversation_observer")
+            event_metadata.update({"memory_id": "", "sender_name": ctx.user_name, "message_id": ctx.message_id})
+            event_metadata.update(self._cross_window_event_metadata(ctx))
+            event_metadata.update(self._reply_chain_metadata(reply_chain))
+            captured_id = await self.store.add_timeline_event(
+                event_type="user_message", session_id=ctx.session_id, scope=ctx.scope,
+                subject_id=ctx.user_id, object_id=ctx.current_target_id,
+                content=self._timeline_content_with_reply_chain(ctx.message_text, reply_chain),
+                metadata=event_metadata,
+            )
         if not captured_id:
             return
         self._schedule_source_semantic_maintenance(ctx, captured_id)
@@ -1937,7 +1938,8 @@ class MemoryCompanionService:
 
     @staticmethod
     def _core_distill_line(record: Any) -> str:
-        return clean_text(record.content, 120)
+        text = record.content.strip()
+        return text if len(text) <= 4000 else ""
 
     async def auto_distill_core_memory(self) -> dict[str, Any]:
         """把长期积累的高价值记忆沉淀为核心记忆块（只补到上限，不覆盖已有块）。"""
@@ -1956,9 +1958,9 @@ class MemoryCompanionService:
             return {"ok": False, "code": "list_failed", "error": self._describe_exception(exc)}
         buckets: dict[str, list[Any]] = {"global": [], "private": [], "group": []}
         for record in memories:
-            if record.memory_type == "core_memory":
+            if record.memory_type not in {"assertion", "preference", "profile", "rule"}:
                 continue
-            if record.lifecycle not in {"stable_memory", "working_memory", ""}:
+            if record.lifecycle != "stable_memory" or record.review_status not in {"auto", "manual"}:
                 continue
             try:
                 score = float(record.salience or 0.0)
@@ -1986,6 +1988,8 @@ class MemoryCompanionService:
                 key = text.casefold()
                 if key in seen:
                     continue
+                if len("\n".join([*facts, text])) > 4000:
+                    continue
                 seen.add(key)
                 facts.append(text)
                 if len(facts) >= 6:
@@ -2009,7 +2013,7 @@ class MemoryCompanionService:
             label = "长期记忆·" + {"global": "整体", "private": "私聊", "group": "群聊"}[bucket]
             payload = {
                 "label": label,
-                "content": "；".join(facts),
+                "content": "\n".join(facts),
                 "scope": bucket,
                 "target_id": target_id,
                 "kind": "fact",
@@ -2247,8 +2251,8 @@ class MemoryCompanionService:
         return {"ok": True, "code": code, "processed": len(results), "results": results}
 
     async def handle_llm_response(self, event: Any, resp: Any) -> None:
-        if getattr(event, "_memory_capture_receipt", None) is not None:
-            return  # Outgoing originals are supplied only by the delivery owner.
+        if getattr(event, "_memory_companion_delivery_owner", False):
+            return  # The native sender supplies actual returned parts, not the draft.
         if self._private_companion_internal_generation_event(event):
             return
         if not self.config.bool("memory_capture.enabled", True):
@@ -2289,6 +2293,7 @@ class MemoryCompanionService:
                 "memory_id": memory_id,
                 "message_id": clean_text(ctx.message_id, 120),
                 "memory_companion_injection_state": injection_state,
+                "delivery_evidence": "generated",
                 **self._cross_window_event_metadata(ctx),
             },
         )
@@ -6419,6 +6424,22 @@ class MemoryCompanionService:
                         errors = self.summarizer.validation_errors(payload or {})
                         content = self.summarizer.compose_memory_content(payload or {})
                         used_summary = attempt
+                        if not errors and self.summarizer.summary_quality(payload or {}) == "normal":
+                            # A separate judgement uses the same explicit model and call budget.
+                            payload["_validation_errors"] = ["来源语义核对尚未通过"]
+                            if round_calls < max_calls and await self.store.reserve_summary_call(
+                                batch_id, max_calls=max_calls, hourly_limit=hourly_limit,
+                                repair=repair, force=force,
+                                lease_seconds=max(240, self.config.int("memory_summary.provider_timeout_seconds", 300) + 60),
+                            ):
+                                round_calls += 1
+                                payload["_validation_errors"] = await self.summarizer.review_grounding(
+                                    attempt["provider"], payload=payload, rows=rows,
+                                    provider_id=attempt["provider_id"] or attempt["source"],
+                                    usage_recorder=self._record_token_usage,
+                                )
+                            errors = self.summarizer.validation_errors(payload)
+                            payload["_grounding_review_passed"] = not errors
                         if not errors:
                             break
                         feedback = "; ".join(errors)
@@ -6606,6 +6627,7 @@ class MemoryCompanionService:
                     "persona_id": clean_text(ctx.persona_id, 96),
                     "summary_quality": summary_quality,
                     "evidence_gate_passed": evidence_gate_passed,
+                    "semantic_grounding_passed": bool((payload or {}).get("_grounding_review_passed")),
                     "raw_timeline_preserved": not evidence_gate_passed,
                     "quality_warnings": list((payload or {}).get("_quality_warnings") or []),
                     "canonical_summary": clean_text((payload or {}).get("canonical_summary"), 2000),
@@ -6632,10 +6654,11 @@ class MemoryCompanionService:
             self.importance.calibrate(record, source="conversation_summary")
             memory_id = await self.store.finish_summary_batch(batch_id, [str(row["id"]) for row in rows], record=record)
             self._schedule_memory_embedding(memory_id, record)
-            await self._persist_assertions(ctx, payload or {}, memory_id, rows)
-            await self._record_verified_group_bot_self_facts(ctx, rows, payload or {}, memory_id)
-            await self._record_self_experience(ctx, rows, payload or {}, memory_id)
-            await self._index_summary_knowledge_graph(ctx, record, payload or {}, memory_id)
+            if evidence_gate_passed:
+                await self._persist_assertions(ctx, payload or {}, memory_id, rows)
+                await self._record_verified_group_bot_self_facts(ctx, rows, payload or {}, memory_id)
+                await self._record_self_experience(ctx, rows, payload or {}, memory_id)
+                await self._index_summary_knowledge_graph(ctx, record, payload or {}, memory_id)
             marked = len(rows)
             logger.info(
                 "[MemoryCompanion] 已生成阶段性长期记忆: session=%s memory=%s events=%s marked=%s",
@@ -6728,7 +6751,6 @@ class MemoryCompanionService:
             record=record,
             mark_timeline=mark_timeline_summarized,
         )
-        await self._persist_assertions(ctx, payload or {}, memory_id, rows)
         logger.warning(
             "[MemoryCompanion] 阶段总结已降级为待复核候选: session=%s batch=%s memory=%s",
             ctx.session_id, batch_id, memory_id,
@@ -6746,8 +6768,7 @@ class MemoryCompanionService:
 
         A summary records what was discussed; an assertion records what is
         true, which is the only part a later conversation can be answered from.
-        Both come out of the single summary call, so this adds no latency and
-        no extra model cost.
+        Both use the summary payload after its source-grounding review.
 
         Failures are contained on purpose: a summary that has already landed
         must never be retried or rolled back because one assertion could not be

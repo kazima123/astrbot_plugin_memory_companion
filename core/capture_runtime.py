@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import json
+import logging
 import secrets
 
 from .models import SessionContext, utc_now
@@ -88,7 +89,8 @@ class CaptureRuntime:
         except (TypeError,ValueError,OverflowError,OSError):
             message_at=''
         try:
-            prepared=self.store.prepare(identity,body=body,source_message_at=message_at,observed_at=utc_now())
+            prepared=self.store.prepare(identity,body=body,source_message_at=message_at,observed_at=utc_now(),
+                                        speaker_name=ctx.user_name[:120])
             authorize=lambda: self.allowed(identity)
             result=self.store.stage(prepared,generation=self.generation,authorize=authorize)
             if result['status'] in {'staged','uncertain','retry_due'}:
@@ -103,6 +105,20 @@ class CaptureRuntime:
         setattr(event,'_memory_capture_receipt',result)
         self.last_error=result['reason']
         self.wake.set()
+        return result
+
+    def sent(self, ctx, text, source_id):
+        """Called by the native sender only after its send call returned."""
+        identity = self.identity(ctx, direction='outgoing', message='sent:' + source_id)
+        try:
+            result = self.submit(identity, dict(body=text, observed_at=utc_now(),
+                                               evidence='adapter_completed', speaker_name='Bot'))
+        except Exception as exc:
+            self.last_error = type(exc).__name__
+            logging.getLogger(__name__).warning('Sent reply capture failed: %s', type(exc).__name__)
+            return {'status': 'uncertain', 'reason': self.last_error}
+        if result.get('status') not in {'committed', 'excluded'}:
+            logging.getLogger(__name__).warning('Sent reply capture pending: %s', result.get('status'))
         return result
 
     def submit(self, identity, request, *, authorize=lambda: True):

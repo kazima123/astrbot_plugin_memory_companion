@@ -139,7 +139,7 @@ class SourceCapture:
             raise ValueError('capture_authority_changed')
 
     def prepare(self, identity, *, body, revision=1, expected_revision=0,
-                source_message_at='', observed_at='', evidence='observed', media=None, raw_body_digest=''):
+                source_message_at='', observed_at='', evidence='observed', media=None, raw_body_digest='', speaker_name=''):
         if set(identity) != set(IDENTITY_FIELDS):
             raise ValueError('capture_identity_incomplete')
         if any(not isinstance(v, str) or '\x00' in v or len(v) > 4096 for v in identity.values()):
@@ -167,6 +167,10 @@ class SourceCapture:
         # in metadata or in an ordinary reversible dictionary of short messages.
         payload = dict(identity=identity, body=body, revision=revision, expected_revision=expected_revision,
                        source_message_at=instant(source_message_at), observed_at=instant(observed_at), evidence=evidence, media=media)
+        if not isinstance(speaker_name, str) or len(speaker_name) > 120:
+            raise ValueError('capture_speaker_name_invalid')
+        if speaker_name:
+            payload['speaker_name'] = speaker_name
         if not payload['observed_at']:
             raise ValueError('capture_observation_time_required')
         if raw_body_digest and (len(raw_body_digest)!=64 or any(c not in '0123456789abcdef' for c in raw_body_digest)):
@@ -286,6 +290,8 @@ class SourceCapture:
                             source_message_at=payload['source_message_at'], observed_at=payload['observed_at'],
                             delivery_evidence=payload['evidence'], media=payload['media'],
                             redaction=payload['redaction'], capture_processing=payload['processing'])
+            if payload.get('speaker_name'):
+                metadata['sender_name'] = payload['speaker_name']
             kind = 'user_message' if identity['direction']=='incoming' else 'bot_response'
             params = dict(source_id=timeline_id,event_type=kind,scope=identity['scope'],session_id=identity['session'],
                           subject_id=identity['speaker'],object_id=identity['audience'],message_id=identity['message'],metadata=metadata)
@@ -298,9 +304,9 @@ class SourceCapture:
                                 (payload['body'],encoded(metadata),when,'',timeline_id))
             else:
                 self.db.execute('''INSERT INTO timeline(id,event_type,session_id,scope,subject_id,object_id,content,
-                    metadata,message_id,dedupe_key,occurred_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)''',
+                    metadata,message_id,dedupe_key,occurred_at,created_at,bot_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                     (timeline_id,kind,identity['session'],identity['scope'],identity['speaker'],identity['audience'],
-                     payload['body'],encoded(metadata),identity['message'],'cap:'+key,when,utc_now()))
+                     payload['body'],encoded(metadata),identity['message'],'cap:'+key,when,utc_now(),identity['bot']))
             actual = self.db.execute('SELECT * FROM timeline WHERE id=?', (timeline_id,)).fetchone()
             if not actual:
                 raise ValueError('capture_timeline_not_committed')
