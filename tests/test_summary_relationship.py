@@ -774,6 +774,49 @@ class SummaryAndRelationshipTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("primary", attempts[0]["source"])
         self.assertIs(provider, attempts[0]["provider"])
 
+    async def test_summary_can_exclude_conversation_model_from_background_attempts(self) -> None:
+        summary = _TextProvider('{"summary":"background"}')
+
+        async def current_provider(_session_id):
+            self.fail("Background-only routing must not resolve the conversation model")
+
+        for scope in ("private", "group", "other"):
+            for available in (True, False):
+                with self.subTest(scope=scope, available=available):
+                    service = self.make_service(
+                        {"memory_summary": {
+                            "provider_id": "summary-model",
+                            "current_session_fallback_enabled": False,
+                        }},
+                        context=SimpleNamespace(
+                            get_provider_by_id=lambda _id: summary if available else None,
+                            get_using_provider=current_provider,
+                        ),
+                    )
+                    attempts = await service._summary_provider_attempts(
+                        SessionContext(session_id="test:1", scope=scope, user_id="u1")
+                    )
+                    self.assertEqual(
+                        ["summary-model"] if available else [],
+                        [item["provider_id"] for item in attempts],
+                    )
+
+    async def test_summary_keeps_conversation_fallback_by_default(self) -> None:
+        summary = _TextProvider('{"summary":"background"}')
+        conversation = _TextProvider('{"summary":"conversation"}')
+        service = self.make_service(
+            {"memory_summary": {"private_provider_id": "summary-model"}},
+            context=SimpleNamespace(
+                get_provider_by_id=lambda _id: summary,
+                get_using_provider=lambda _session_id: conversation,
+            ),
+        )
+        attempts = await service._summary_provider_attempts(
+            SessionContext(session_id="test:1", scope="private", user_id="u1")
+        )
+        self.assertEqual(["scene_primary", "current_session"], [item["source"] for item in attempts])
+        self.assertIs(conversation, attempts[-1]["provider"])
+
     async def test_summary_provider_attempts_use_scope_specific_models(self) -> None:
         providers = {
             "private-model": _TextProvider('{"summary":"private"}'),

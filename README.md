@@ -342,6 +342,8 @@ astrbot_plugin_memory_companion
 
 私聊和群聊可以分别选择总结模型：`memory_summary.private_provider_id` 只处理私聊时间线，`memory_summary.group_provider_id` 只处理群聊时间线。对应的 `private_fallback_provider_id` / `group_fallback_provider_id` 用于主模型失败时的备用尝试；未填写专用字段，或专用模型调用失败时，会兼容使用 `provider_id` / `fallback_provider_id`，再回退到当前会话模型。这样可以为群聊选择更轻量或更擅长多人对话的模型，同时不影响已有配置。
 
+如果主对话模型不应承担后台总结，可将 `memory_summary.current_session_fallback_enabled` 设为 `false`，并明确配置总结 Provider。此时总结只尝试配置的主模型和备用模型；全部失败或不可用时保留待处理任务，不使用当前会话模型。该开关默认为 `true`，保持已有安装的回退行为。
+
 如果日志显示请求 `127.0.0.1:11434` 超时，含义是本机 Ollama 没有在期限内生成总结，不是记忆数据库损坏。当前版本默认最多等待 180 秒、单个 Provider 只请求一次；失败后会尝试不同的备用 Provider，并完整保留尚未总结的时间线。可在这里换用更轻的本地模型或独立总结 Provider，并按机器性能调整“总结模型超时秒数”。
 
 ### 重要性评估

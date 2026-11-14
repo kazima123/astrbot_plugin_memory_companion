@@ -7361,19 +7361,20 @@ class MemoryCompanionService:
         The original ``provider_id``/``fallback_provider_id`` pair remains a
         shared compatibility fallback.  A scene-specific pair takes
         precedence when configured, while the generic pair is still tried
-        before falling back to the provider currently active for the session.
+        before optionally falling back to the provider active for the session.
         This keeps existing installations working and lets private and group
         timelines use independent models.
         """
         scope = clean_text(getattr(ctx, "scope", ""), 40).lower()
         scene = "group" if scope == "group" else "private" if scope == "private" else ""
+        include_current = self.config.bool("memory_summary.current_session_fallback_enabled", True)
         if not scene:
             return await self._provider_attempts(
                 ctx,
                 prefix="memory_summary",
                 provider_key="provider_id",
                 fallback_provider_key="fallback_provider_id",
-                include_current=True,
+                include_current=include_current,
             )
 
         # Resolve scene-specific providers first, then preserve the legacy
@@ -7384,7 +7385,7 @@ class MemoryCompanionService:
             prefix="memory_summary",
             provider_key=f"{scene}_provider_id",
             fallback_provider_key=f"{scene}_fallback_provider_id",
-            include_current=True,
+            include_current=include_current,
             compatibility_provider_key="provider_id",
             compatibility_fallback_provider_key="fallback_provider_id",
         )

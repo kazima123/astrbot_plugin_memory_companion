@@ -299,14 +299,14 @@
       "provider_id": {
         "description": "通用总结模型提供商（兼容回退）",
         "_special": "select_provider",
-        "hint": "私聊或群聊专用 Provider 未配置或专用模型失败时使用此通用 Provider；留空则使用当前会话正在使用的模型。",
+        "hint": "私聊或群聊专用 Provider 未配置或专用模型失败时使用此通用 Provider；留空且允许回退当前会话模型时使用当前会话模型。",
         "type": "string",
         "default": ""
       },
       "fallback_provider_id": {
         "description": "通用备用总结模型提供商（兼容回退）",
         "_special": "select_provider",
-        "hint": "对应专用备用 Provider 未配置时使用；专用主模型不可用或总结失败时也会尝试。留空则直接回退当前会话模型。",
+        "hint": "对应专用备用 Provider 未配置时使用；专用主模型不可用或总结失败时也会尝试。留空且允许回退当前会话模型时才尝试当前会话模型。",
         "type": "string",
         "default": ""
       },
@@ -320,7 +320,7 @@
       "private_fallback_provider_id": {
         "description": "私聊备用总结模型提供商",
         "_special": "select_provider",
-        "hint": "私聊主总结模型失败时使用。留空时依次回退到通用备用 Provider 和当前会话模型。",
+        "hint": "私聊主总结模型失败时使用。留空时尝试通用 Provider；是否再尝试当前会话模型由下方开关决定。",
         "type": "string",
         "default": ""
       },
@@ -334,9 +334,15 @@
       "group_fallback_provider_id": {
         "description": "群聊备用总结模型提供商",
         "_special": "select_provider",
-        "hint": "群聊主总结模型失败时使用。留空时依次回退到通用备用 Provider 和当前会话模型。",
+        "hint": "群聊主总结模型失败时使用。留空时尝试通用 Provider；是否再尝试当前会话模型由下方开关决定。",
         "type": "string",
         "default": ""
+      },
+      "current_session_fallback_enabled": {
+        "description": "允许总结回退到当前会话模型",
+        "hint": "默认开启，保留原有回退顺序。关闭后仅使用明确配置的总结和备用 Provider；全部不可用或失败时保留待处理任务，不调用主对话模型。",
+        "type": "bool",
+        "default": true
       },
       "min_events": {
         "description": "最少事件数",
