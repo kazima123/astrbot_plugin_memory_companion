@@ -59,3 +59,35 @@ async def test_sent_capture_respects_disabled_bot_capture(service, ctx):
     result = service.capture.sent(ctx, "不应入库", "turn-2:part-1")
     assert result["status"] == "excluded"
     assert service.store._conn.execute("SELECT count(*) FROM timeline").fetchone()[0] == 0
+
+
+async def test_single_character_refusal_survives_without_an_llm_request(service, ctx):
+    ctx.message_text = "不"
+    incoming = event(ctx.message_text, "brief-refusal")
+    service.reply_chain.resolve = AsyncMock(return_value=[])
+    service.portraits.capture_user_message = AsyncMock(return_value={})
+    service._schedule_session_summary = lambda *args, **kwargs: None
+    await service.handle_group_message(incoming)
+    rows = service.store._conn.execute("SELECT content FROM timeline").fetchall()
+    assert [row["content"] for row in rows] == ["不"], (
+        "a refusal must remain an original source even when Companion merges the turn or stays silent"
+    )
+
+
+async def test_quoted_reply_keeps_context_separate_from_the_users_words(service, ctx):
+    ctx.message_text = "不是这个"
+    incoming = event(ctx.message_text, "quoted-correction")
+    service.reply_chain.resolve = AsyncMock(return_value=[
+        {"message_id": "earlier-bot-message", "depth": 1, "text": "你是说明天吃火锅？"},
+    ])
+    service.portraits.capture_user_message = AsyncMock(return_value={})
+    service._schedule_session_summary = lambda *args, **kwargs: None
+    await service.handle_group_message(incoming)
+    receipt = await service.capture.incoming(incoming, ctx)
+    row = service.store._conn.execute("SELECT * FROM timeline").fetchone()
+    metadata = json.loads(row["metadata"])
+    assert row["content"] == "不是这个", "quoted words must never be attributed to the current speaker"
+    assert metadata["reply_chain_message_ids"] == ["earlier-bot-message"]
+    assert metadata["reply_chain_preview"] == "直接被引用: 你是说明天吃火锅？"
+    assert service.capture.read_original(receipt["source_key"])["body"] == "不是这个"
+    assert service.store._conn.execute("SELECT count(*) FROM timeline").fetchone()[0] == 1

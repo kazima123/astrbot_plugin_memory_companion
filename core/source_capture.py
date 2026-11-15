@@ -139,7 +139,8 @@ class SourceCapture:
             raise ValueError('capture_authority_changed')
 
     def prepare(self, identity, *, body, revision=1, expected_revision=0,
-                source_message_at='', observed_at='', evidence='observed', media=None, raw_body_digest='', speaker_name=''):
+                source_message_at='', observed_at='', evidence='observed', media=None, raw_body_digest='', speaker_name='',
+                reply_context=None):
         if set(identity) != set(IDENTITY_FIELDS):
             raise ValueError('capture_identity_incomplete')
         if any(not isinstance(v, str) or '\x00' in v or len(v) > 4096 for v in identity.values()):
@@ -171,6 +172,17 @@ class SourceCapture:
             raise ValueError('capture_speaker_name_invalid')
         if speaker_name:
             payload['speaker_name'] = speaker_name
+        if reply_context:
+            if (not isinstance(reply_context, dict)
+                    or set(reply_context) != {'reply_chain_depth', 'reply_chain_message_ids', 'reply_chain_preview'}
+                    or type(reply_context['reply_chain_depth']) is not int
+                    or not isinstance(reply_context['reply_chain_message_ids'], list)
+                    or len(reply_context['reply_chain_message_ids']) > 3
+                    or any(not isinstance(ref, str) or len(ref) > 120 for ref in reply_context['reply_chain_message_ids'])
+                    or not isinstance(reply_context['reply_chain_preview'], str)
+                    or len(reply_context['reply_chain_preview']) > 520):
+                raise ValueError('capture_reply_context_invalid')
+            payload['reply_context'] = json.loads(redact_sensitive_text(encoded(reply_context)))
         if not payload['observed_at']:
             raise ValueError('capture_observation_time_required')
         if raw_body_digest and (len(raw_body_digest)!=64 or any(c not in '0123456789abcdef' for c in raw_body_digest)):
@@ -292,6 +304,7 @@ class SourceCapture:
                             redaction=payload['redaction'], capture_processing=payload['processing'])
             if payload.get('speaker_name'):
                 metadata['sender_name'] = payload['speaker_name']
+            metadata.update(payload.get('reply_context', {}))
             kind = 'user_message' if identity['direction']=='incoming' else 'bot_response'
             params = dict(source_id=timeline_id,event_type=kind,scope=identity['scope'],session_id=identity['session'],
                           subject_id=identity['speaker'],object_id=identity['audience'],message_id=identity['message'],metadata=metadata)

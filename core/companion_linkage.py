@@ -19,7 +19,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping
+from types import SimpleNamespace
 from typing import Any
+
+from .memory_lifecycle import evaluate_memory_lifecycle
 
 logger = logging.getLogger(__name__)
 
@@ -106,13 +109,17 @@ class CompanionMemoryLinkage:
     def register(self) -> bool:
         """尝试注册。注册表不存在（private_companion 未加载）时返回 False。"""
 
-        if self._registration_id:
-            return True
         context = getattr(self.plugin, "context", None)
         if context is None:
             self._last_reason = "no_context"
             return False
         registry = getattr(context, REGISTRY_ATTRIBUTE, None)
+        if self._registration_id:
+            if registry is self._registry and not getattr(registry, "closed", False):
+                return True
+            # Companion hot reload replaces its host-local registry. A token
+            # issued by the old host cannot declare the new host connected.
+            self.unregister()
         register = getattr(registry, "register", None)
         if not callable(register):
             self._last_reason = "no_registry"
@@ -207,32 +214,59 @@ class CompanionMemoryLinkage:
     async def _read(self, request: Any) -> dict[str, Any]:
         """返回该用户最近一段私聊记忆，供 V2 注入「外部记忆参考」。"""
 
-        user_id, _platform, _bot_id = _request_identity(request)
-        if not user_id:
+        user_id, platform, _bot_id = _request_identity(request)
+        scope = _request_context(request).get("scope")
+        scope = scope if isinstance(scope, Mapping) else {}
+        # Companion's bot_id names its logical role owner. Memory stores the
+        # native account id, so comparing those two would hide every QQ memory.
+        account_id = _clean(scope.get("account_id"), 120)
+        if not user_id or not platform or not account_id or scope.get("kind") != "private":
             return {"items": []}
-        store = getattr(self._service, "store", None)
+        service = self._service
+        store = getattr(service, "store", None)
         reader = getattr(store, "read_user_memory_summary_records", None)
         if not callable(reader):
             return {"items": []}
         payload = request if isinstance(request, Mapping) else {}
         limit = _int(payload.get("limit"), 8, 1, 20)
         max_chars = _int(payload.get("max_chars"), 2400, 0, 20000)
+        if not max_chars:
+            return {"items": []}
+        session_id = f"{platform}:FriendMessage:{_clean(scope.get('session_id'), 120) or user_id}"
         try:
-            raw = await reader(user_id, session_id="", limit=limit)
+            ctx = service.session_context_from_bridge({
+                "scope": "private", "session_id": session_id, "platform": platform,
+                "user_id": user_id, "bot_id": account_id,
+            })
+            if (not service.config.bool("private_companion_bridge.enabled", True)
+                    or not service._scope_feature_enabled(ctx, "recall")):
+                return {"items": []}
+            ctx.persona_id = await service._resolve_default_persona_id(SimpleNamespace(
+                unified_msg_origin=session_id, get_platform_name=lambda: platform,
+            ))
+            raw = await reader(user_id, session_id=session_id, limit=limit)
+            records = raw.get("records") if isinstance(raw, Mapping) else None
+            if not isinstance(records, (list, tuple)):
+                return {"items": []}
+            # The summary endpoint is a panel projection, not a recall gate.
+            # Reuse normal recall policy so disabled core blocks, pending
+            # profiles, other personas and denied sources cannot re-enter here.
+            visible, _blocked = await service._retrieval_validation_engine().filter_visible_candidates(
+                [record for record in records if evaluate_memory_lifecycle(record, ctx).eligible],
+                ctx, reason="companion_external_memory",
+            )
         except Exception as exc:
             logger.debug("[MemoryCompanion] 外部记忆 read 失败: %s", exc)
             return {"items": []}
-        records = raw.get("records") if isinstance(raw, Mapping) else None
-        if not isinstance(records, (list, tuple)):
-            return {"items": []}
         items: list[dict[str, str]] = []
         used = 0
-        for record in records:
-            content = _clean(getattr(record, "content", ""), 1200)
+        for result in visible:
+            record = result.memory
+            content = record.content.strip()
             if not content:
                 continue
             size = len(content)
-            if max_chars and used + size > max_chars:
+            if used + size > max_chars:
                 continue
             used += size
             items.append(

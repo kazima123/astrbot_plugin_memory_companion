@@ -34,6 +34,36 @@ async def test_missing_verdict_does_not_mean_supported():
     with pytest.raises(SummaryFormatError):
         await s.review_grounding(p,payload={},rows=[],provider_id='background',usage_recorder=None)
 
+def test_long_utterance_keeps_its_final_negation_and_separate_quote_context():
+    summarizer = MemorySummarizer()
+    text = "这是前面的背景。" * 110 + "但我并没有答应明天去。"
+    rows = [dict(id="long", event_type="user_message", subject_id="user", content=text,
+                 metadata=json.dumps({"reply_chain_preview": "Bot 曾问明天是否一起去",
+                                      "reply_chain_message_ids": ["quoted-one"]}))]
+    transcript, consumed = summarizer._transcript_lines_and_rows(rows)
+    parsed = json.loads(transcript[0])
+    assert parsed["content"].endswith("但我并没有答应明天去。")
+    assert parsed["quoted_context"]["message_ids"] == ["quoted-one"]
+    assert "明天是否一起去" not in parsed["content"]
+    assert consumed == rows
+
+def test_generated_reply_is_labeled_as_a_draft_in_summary_input():
+    summarizer = MemorySummarizer()
+    rows = [dict(id="draft", event_type="bot_response", subject_id="bot", content="我答应你。",
+                 metadata=json.dumps({"delivery_evidence": "generated"}))]
+    transcript, _ = summarizer._transcript_lines_and_rows(rows)
+    assert json.loads(transcript[0])["delivery_evidence"] == "generated"
+    assert "不代表已发送" in summarizer._build_prompt(rows, "private")
+
+def test_text_and_voice_share_one_reply_turn_and_control_marker_is_not_a_fact():
+    summarizer = MemorySummarizer()
+    rows = [dict(id=f"part-{i}", event_type="bot_response", subject_id="bot",
+                 message_id=f"sent:core-reply:one-turn:{i}", content=text, metadata="{}")
+            for i, text in enumerate(["我们一会儿吃饭。", "我们一会儿吃饭。", "<<PRIVATE_COMPANION_SPLIT>>"])]
+    transcript, consumed = summarizer._transcript_lines_and_rows(rows)
+    assert len(consumed) == 2
+    assert {json.loads(line)["reply_turn_id"] for line in transcript} == {"sent:core-reply:one-turn"}
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('supported',[True,False])
 async def test_verdict_controls_stable_memory_and_derivatives_within_budget(service,ctx,supported):

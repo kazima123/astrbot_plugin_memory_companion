@@ -58,7 +58,7 @@ class CaptureRuntime:
                     scope=ctx.scope,session=ctx.session_id,speaker=ctx.user_id if direction=='incoming' else ctx.bot_id,
                     audience=ctx.user_id if ctx.scope=='private' else ctx.group_id,direction=direction,message=message)
 
-    async def incoming(self, event, ctx=None):
+    async def incoming(self, event, ctx=None, *, reply_chain=None):
         old=getattr(event,'_memory_capture_receipt',None)
         if old is not None:
             return old
@@ -83,6 +83,9 @@ class CaptureRuntime:
         body=''.join(str(p.text) for p in parts if type(p).__name__=='Plain') if isinstance(parts,list) else str(getattr(event,'message_str','') or '')
         if not body:
             return None
+        if reply_chain is None:
+            reply_chain = await s._reply_chain_for_event(event)
+        reply_context = s._reply_chain_metadata(reply_chain)
         stamp=getattr(obj,'timestamp',None)
         try:
             message_at=datetime.fromtimestamp(float(stamp),timezone.utc).isoformat() if stamp else ''
@@ -90,7 +93,7 @@ class CaptureRuntime:
             message_at=''
         try:
             prepared=self.store.prepare(identity,body=body,source_message_at=message_at,observed_at=utc_now(),
-                                        speaker_name=ctx.user_name[:120])
+                                        speaker_name=ctx.user_name[:120], reply_context=reply_context)
             authorize=lambda: self.allowed(identity)
             result=self.store.stage(prepared,generation=self.generation,authorize=authorize)
             if result['status'] in {'staged','uncertain','retry_due'}:

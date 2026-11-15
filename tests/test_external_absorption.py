@@ -207,6 +207,19 @@ class MergeRelationProfileTests(unittest.TestCase):
         self.assertEqual(merged["relation_note"], "别在灰凝面前提她前任")
         self.assertEqual(merged["relation_source"], RELATION_SOURCE_CONTEXT)
 
+    def test_later_user_correction_replaces_the_users_previous_relation(self) -> None:
+        previous = dict(self.old, relation_label="恋人", relation_address="宝宝",
+                        relation_source=RELATION_SOURCE_USER)
+        corrected = merge_relation_profile(previous, {
+            "relation": "朋友", "address": "小林", "source": RELATION_SOURCE_USER,
+        })
+        self.assertEqual(corrected["relation_label"], "朋友")
+        self.assertEqual(corrected["relation_address"], "小林")
+        self.assertEqual(corrected["relation_source"], RELATION_SOURCE_USER)
+        self.assertEqual(previous["relation_label"], "恋人")
+        # The new user correction remains authoritative over later plugin hints.
+        self.assertEqual(merge_relation_profile(corrected, self.hint), corrected)
+
     def test_relation_seen_at_is_iso_with_timezone(self) -> None:
         merged = merge_relation_profile({}, self.hint)
         seen = merged["relation_seen_at"]

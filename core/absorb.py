@@ -151,16 +151,17 @@ def merge_relation_profile(existing: Mapping[str, Any], hint: Mapping[str, Any])
     """把一个关系候选并进 identities.profile 用的字典，返回新 dict。
 
     规则：
-      * 旧 profile 的 relation_source 是 user（用户亲口说的）时整套保留——
-        插件推断再新鲜也盖不过本人说法；
+      * 旧 profile 的 relation_source 是 user（用户亲口说的）时不接受插件覆盖，
+        但用户本人的后续纠正仍然有效；
       * hint 里为空的字段不覆盖旧值；
       * 入参不改，返回的是新字典；profile 里的其他键原样带走。
     """
     profile: dict = dict(existing) if isinstance(existing, Mapping) else {}
-    if str(profile.get("relation_source") or "").strip() == RELATION_SOURCE_USER:
+    hint_map = hint if isinstance(hint, Mapping) else {}
+    if (str(profile.get("relation_source") or "").strip() == RELATION_SOURCE_USER
+            and _clean(hint_map.get("source"), 16) != RELATION_SOURCE_USER):
         return profile
 
-    hint_map = hint if isinstance(hint, Mapping) else {}
     relation = _clean(hint_map.get("relation"), RELATION_MAX_CHARS)
     address = _clean(hint_map.get("address"), ADDRESS_MAX_CHARS)
     note = _clean(hint_map.get("note"), NOTE_MAX_CHARS)

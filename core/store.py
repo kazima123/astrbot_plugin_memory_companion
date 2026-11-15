@@ -12322,6 +12322,18 @@ class MemoryStore(SummaryBatchStore):
             ).fetchall()
         return [MemoryRecord.from_row(row) for row in rows]
 
+    async def external_journal_revisions(self, entry_id: str, source_plugin: str) -> list[MemoryRecord]:
+        def read() -> list[MemoryRecord]:
+            with self._lock:
+                rows = self._conn.execute(
+                    """SELECT * FROM memories WHERE memory_type='persona_life'
+                       AND source_plugin=? AND json_extract(metadata, '$.journal_entry_id')=?
+                       ORDER BY CAST(json_extract(metadata, '$.journal_revision') AS INTEGER) DESC""",
+                    (source_plugin, entry_id),
+                ).fetchall()
+            return [MemoryRecord.from_row(row) for row in rows]
+        return await self._run_recoverable_database_operation(read)
+
     async def list_memories(
         self,
         *,
