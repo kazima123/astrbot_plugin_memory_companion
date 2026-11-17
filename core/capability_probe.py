@@ -157,6 +157,11 @@ def _companion_api_from_modules() -> object | None:
     return None
 
 
+def active_companion_api(context: object = None) -> object | None:
+    api, registry_available = _companion_api_from_registry(context)
+    return api if api is not None or registry_available else _companion_api_from_modules()
+
+
 def detect_companion_plugin(context: object = None) -> dict[str, object]:
     """真实探测陪伴插件是否已装且已激活。
 
@@ -177,10 +182,7 @@ def detect_companion_plugin(context: object = None) -> dict[str, object]:
     判定标准是陪伴插件的运行时入口返回非 ``None``：它答的是「现在真的能用」，
     而不是「磁盘上有这个目录」。模块能 import 但桥接未就绪，仍然报未装。
     """
-    api, registry_available = _companion_api_from_registry(context)
-    if api is None and not registry_available:
-        api = _companion_api_from_modules()
-    installed = api is not None
+    installed = active_companion_api(context) is not None
     return {
         "companion_installed": installed,
         "companion_plugin_name": COMPANION_PLUGIN_ID if installed else "",

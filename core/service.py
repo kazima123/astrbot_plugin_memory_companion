@@ -65,6 +65,7 @@ from .bot_personal_dto import (
     sanitize_bot_personal_value,
 )
 from .profile_api import build_profile_result
+from .capability_probe import active_companion_api
 from .chat_import import HistoricalChatImporter
 from .classifier import MemoryClassifier
 from .config import ConfigView
@@ -6371,6 +6372,32 @@ class MemoryCompanionService:
             int(calls or 0),
         )
 
+    async def _summary_participants(self, ctx: SessionContext, rows: list[dict] | None = None) -> dict:
+        if ctx.scope != "private" or not self.config.bool("private_companion_bridge.enabled", True):
+            return {}
+        account_id, user_id, persona_id = ctx.bot_id, ctx.user_id, ctx.persona_id
+        if rows is not None:
+            # The automatic drain only carries the session ID. Use the batch's
+            # own actors so a previous persona cannot inherit the active one's profile.
+            identities = {
+                (row["bot_id"],
+                 row["subject_id"] if row["event_type"] == "user_message" else row["object_id"],
+                 json_loads(row["metadata"], {}).get("persona_id", ""))
+                for row in rows if row["event_type"] in ("user_message", "bot_response", "proactive_message")
+            }
+            if len(identities) != 1:
+                return {}
+            account_id, user_id, persona_id = identities.pop()
+        read = getattr(active_companion_api(self.context), "memory_summary_participants", None)
+        if not callable(read):
+            return {}
+        try:
+            return await read(session_id=ctx.session_id, account_id=account_id,
+                              user_id=user_id, persona_id=persona_id)
+        except Exception as exc:
+            logger.warning("[MemoryCompanion] 总结称呼资料读取失败: %s", type(exc).__name__)
+            return {}
+
     async def maybe_summarize_session(self, ctx: SessionContext, *, force: bool = False) -> str:
         if not force and not self.config.bool("memory_summary.enabled", True):
             return ""
@@ -6424,6 +6451,7 @@ class MemoryCompanionService:
             summary_attempts = await self._summary_provider_attempts(ctx)
             if not summary_attempts:
                 return ""
+            participants = await self._summary_participants(ctx, rows)
             slot_held = await self._acquire_summary_call_slot(force=force)
             if not slot_held:
                 return ""
@@ -6458,6 +6486,7 @@ class MemoryCompanionService:
                             usage_recorder=self._record_token_usage,
                             usage_task="memory_summary_repair" if repair else "memory_summary",
                             repair_feedback=feedback, previous_response=previous_response,
+                            participants=participants,
                         )
                         errors = self.summarizer.validation_errors(payload or {})
                         content = self.summarizer.compose_memory_content(payload or {})
@@ -6475,6 +6504,7 @@ class MemoryCompanionService:
                                     attempt["provider"], payload=payload, rows=rows,
                                     provider_id=attempt["provider_id"] or attempt["source"],
                                     usage_recorder=self._record_token_usage,
+                                    participants=participants,
                                 )
                             errors = self.summarizer.validation_errors(payload)
                             payload["_grounding_review_passed"] = not errors
@@ -10389,6 +10419,10 @@ class MemoryCompanionService:
             total += cost
         if not lines:
             return "", []
+        participants = (
+            await self._summary_participants(ctx)
+            if all(item["record"].session_id == ctx.session_id for item in items) else {}
+        )
         max_chars = self.config.int("maintenance.memory_decay_summary_chars", 900)
         prompt = (
             "请把下面这些即将衰减的长期记忆碎片合并成一条更高层、可检索、可长期保留的记忆摘要。\n"
@@ -10407,6 +10441,7 @@ class MemoryCompanionService:
             "<untrusted_memory_jsonl>\n"
             f"{chr(10).join(lines)}"
             "\n</untrusted_memory_jsonl>"
+            + self.summarizer.participant_context(participants)
         )
         kwargs: dict[str, Any] = {
             "prompt": prompt,
@@ -10450,6 +10485,7 @@ class MemoryCompanionService:
         errors = await self.summarizer.review_grounding(
             provider, payload={"canonical_summary": summary}, rows=[], sources=sources,
             provider_id=self._provider_runtime_id(provider), usage_recorder=self._record_token_usage,
+            participants=participants,
         )
         if errors:
             raise ValueError("decay_grounding_failed: " + "; ".join(errors))

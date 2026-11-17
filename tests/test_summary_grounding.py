@@ -1,10 +1,11 @@
 """Lexically matching a quote must not authorize speaker or habit inventions."""
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import pytest
 from core.summarizer import MemorySummarizer, SummaryFormatError
-from .test_source_query import service, ctx
+from .test_source_query import add_row, service, ctx
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('claim,issue', [
@@ -89,3 +90,40 @@ async def test_verdict_controls_stable_memory_and_derivatives_within_budget(serv
     assert service._record_self_experience.await_count==int(supported)
     assert service._persist_assertions.await_count==int(supported)
     assert service.store._conn.execute('select count(*) from summary_batch_calls').fetchone()[0]==2
+
+
+@pytest.mark.asyncio
+async def test_background_summary_and_review_share_the_exact_private_participants(service, ctx):
+    service.config.raw["memory_summary"] = {"max_retries": 2, "min_events": 1, "trigger_event_count": 1}
+    ref = await add_row(service, ctx, "我今天下班后再回来吃饭。")
+    participants = {"user": {"gender": "男", "address": "小舟"}, "bot": {"gender": "女", "address": "小星"}}
+    read = AsyncMock(return_value=participants)
+    star = SimpleNamespace(root_dir_name="astrbot_plugin_private_companion", activated=True,
+                           star_cls=SimpleNamespace(extension_api=SimpleNamespace(memory_summary_participants=read)))
+    service.context = SimpleNamespace(get_all_stars=lambda: [star])
+    summary = {"summary": "小舟说下班后再回来吃饭。", "summary_refs": [ref]}
+    provider = SimpleNamespace(text_chat=AsyncMock(side_effect=[
+        SimpleNamespace(completion_text=json.dumps(summary, ensure_ascii=False)),
+        SimpleNamespace(completion_text='{"supported":true,"issues":[]}'),
+    ]))
+    service._summary_provider_attempts = AsyncMock(return_value=[
+        {"provider": provider, "provider_id": "background", "source": "primary"}])
+    service._schedule_memory_embedding = lambda *args: None
+    # The scheduled drain starts from the persisted window, with no event or person profile attached.
+    minimal = replace(ctx, user_id="", persona_id="")
+    memory_id = await service.maybe_summarize_session(minimal)
+    read.assert_awaited_once_with(session_id=ctx.session_id, account_id=ctx.bot_id,
+                                  user_id=ctx.user_id, persona_id=ctx.persona_id)
+    assert (await service.store.get_memory(memory_id)).lifecycle == "stable_memory"
+    assert provider.text_chat.await_count == 2
+    for call in provider.text_chat.call_args_list:
+        prompt = call.kwargs["prompt"]
+        assert json.loads(prompt.rsplit("\n", 1)[-1]) == participants
+        assert "原话保持原样" in prompt and "不从中提取新记忆" in prompt
+        assert "我今天下班后再回来吃饭。" in prompt
+
+    rows = [dict(row) for row in service.store._conn.execute("SELECT * FROM timeline")]
+    assert await service._summary_participants(replace(ctx, scope="group"), rows) == {}
+    mixed = {**rows[0], "metadata": json.dumps({"persona_id": "old-persona"})}
+    assert await service._summary_participants(ctx, [*rows, mixed]) == {}
+    assert read.await_count == 1

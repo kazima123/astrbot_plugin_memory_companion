@@ -49,6 +49,8 @@ async def test_compression_archives_only_complete_reviewed_input(service):
     a = await seed(service)
     b = await seed(service, id="source-b", content="独立重要事实。" * 400)
     provider = provider_for(service, "用户今天打算饭后洗澡。", True)
+    participants = {"user": {"gender": "男", "address": "小舟"}}
+    service._summary_participants = AsyncMock(return_value=participants)
     result = await service._summarize_decay_group({"bucket": "one", "items": [a, b]})
     assert result["archived"] == 1
     assert (await service.store.get_memory("source-b")).lifecycle == "stable_memory"
@@ -57,6 +59,9 @@ async def test_compression_archives_only_complete_reviewed_input(service):
     review = provider.text_chat.call_args_list[1].kwargs["prompt"]
     assert '"source_kind":"memory"' in review.replace(" ", "")
     assert "source-b" not in review
+    assert service._summary_participants.await_count == 1
+    for call in provider.text_chat.call_args_list:
+        assert json.loads(call.kwargs["prompt"].rsplit("\n", 1)[-1]) == participants
 
 
 async def test_pending_memory_cannot_be_promoted_by_compression(service):
