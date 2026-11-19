@@ -214,6 +214,11 @@ class MemoryCompanionPlugin(Star):
         else:
             self._init_failed = False
 
+    @filter.on_plugin_loaded()
+    async def on_companion_loaded(self, metadata):
+        if metadata.name == "astrbot_plugin_private_companion":
+            self.companion_linkage.register()
+
     def bot_personal_capability_status(self) -> dict[str, Any]:
         """现探，不吃启动时拍的那张快照。
 

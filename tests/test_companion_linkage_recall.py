@@ -108,7 +108,14 @@ async def test_companion_hot_reload_replaces_the_registration_instead_of_reporti
 
     replacement = SimpleNamespace(closed=False, register=Mock(return_value="new-token"), unregister=Mock())
     host._private_companion_memory_providers = replacement
-    assert linkage.register(), "opening the existing bridge after reload must reconnect to the new registry"
+    from .package_bootstrap import bootstrap_package
+    bootstrap_package()
+    from astrbot_plugin_memory_companion.main import MemoryCompanionPlugin
+
+    plugin = SimpleNamespace(companion_linkage=linkage)
+    await MemoryCompanionPlugin.on_companion_loaded(plugin, SimpleNamespace(name="unrelated_plugin"))
+    replacement.register.assert_not_called()
+    await MemoryCompanionPlugin.on_companion_loaded(plugin, SimpleNamespace(name="astrbot_plugin_private_companion"))
     previous.unregister.assert_called_once_with("old-token")
     replacement.register.assert_called_once()
     assert linkage._registry is replacement and linkage.registered
