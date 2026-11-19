@@ -26,7 +26,7 @@ from .core.query_session import bind_query_tool_schema, bind_query_tool_v3_schem
 from .core.service import MemoryCompanionService
 
 PLUGIN_NAME = "astrbot_plugin_memory_companion"
-PLUGIN_VERSION = "2.6.6"
+PLUGIN_VERSION = "2.6.6a"
 
 _ACTIVE_BRIDGE: MemoryCompanionBridge | None = None
 
@@ -80,7 +80,7 @@ def _normalize_query_parameters(raw: Any) -> dict[str, Any] | None:
     "menglimi",
     "我会牢牢记住你：结构化长期记忆、共同自我时间线和关系隔离。",
     PLUGIN_VERSION,
-    "https://github.com/menglimi/astrbot_plugin_memory_companion",
+    "https://github.com/kazima123/astrbot_plugin_memory_companion",
 )
 class MemoryCompanionPlugin(Star):
     def __init__(self, context: Context, config: dict[str, Any]):

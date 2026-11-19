@@ -1,6 +1,6 @@
 """Companion's extra recall path must respect the same memory decisions."""
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import Mock
 
 import pytest
 
@@ -13,12 +13,22 @@ pytestmark = pytest.mark.asyncio
 
 @pytest.fixture
 def linkage(service):
-    service._resolve_default_persona_id = AsyncMock(return_value="persona-a")
-    return CompanionMemoryLinkage(SimpleNamespace(service=service))
+    def authorize(req):
+        if req["context"]["scope"] != request()["context"]["scope"]:
+            raise ValueError("unverified route")
+        return {"schema": "companion.linked-memory-read.v1", "persona_id": "persona-a",
+                "reader_user_id": "user-a", "members": [{"session_id": "qq:FriendMessage:user-a",
+                "platform": "qq", "bot_id": "logical-role-owner", "account_id": "qq-bot",
+                "native_account_id": "user-a", "memory_identity": {"owner_bot_id": "qq-bot"}}]}
+    registry = SimpleNamespace(authorize_memory_read=authorize)
+    context = SimpleNamespace(_private_companion_memory_providers=registry)
+    link = CompanionMemoryLinkage(SimpleNamespace(service=service, context=context))
+    link._registry = registry
+    return link
 
 
 def request(**scope_changes):
-    return {"context": {"scope": {
+    return {"purpose": "recall", "context": {"scope": {
         "kind": "private", "native_scope_id": "user-a", "session_id": "user-a",
         "platform": "qq", "bot_id": "logical-role-owner", "account_id": "qq-bot",
         **scope_changes,
@@ -43,14 +53,12 @@ async def test_native_account_identity_keeps_the_actual_pair_readable(service, l
     assert [item["id"] for item in result["items"]] == ["allowed"], (
         "Companion's logical bot owner must not be confused with Memory's native QQ owner"
     )
-    event = service._resolve_default_persona_id.call_args.args[0]
-    assert event.unified_msg_origin == "qq:FriendMessage:user-a"
 
 
 @pytest.mark.parametrize("changes", [
-    {"memory_type": "core_memory", "metadata": {"core_enabled": False}},
+    {"memory_type": "core_memory", "metadata": {"core_enabled": False, "persona_id": "persona-a"}},
     {"lifecycle": "raw_event"},
-    {"memory_type": "assertion", "metadata": {"profile_state": "candidate"}},
+    {"memory_type": "assertion", "metadata": {"profile_state": "candidate", "persona_id": "persona-a"}},
     {"review_status": "pending", "lifecycle": "short_term_candidate"},
     {"metadata": {"persona_id": "persona-b"}},
     {"owner_bot_id": "another-account", "object": EntityRef.bot_self(bot_id="another-account")},
@@ -72,13 +80,13 @@ async def test_extra_reader_does_not_reintroduce_unusable_memory(service, linkag
 async def test_disabled_recall_is_not_bypassed_by_the_registered_reader(service, linkage, section, key):
     await add_memory(service, "allowed")
     service.config.raw.setdefault(section, {})[key] = False
-    assert await linkage._read(request()) == {"items": []}
+    assert (await linkage._read(request()))["items"] == []
 
 
 @pytest.mark.parametrize("changes", [{"kind": "group"}, {"account_id": ""}, {"session_id": "another-user"}])
 async def test_reader_requires_the_actual_private_context(service, linkage, changes):
     await add_memory(service, "allowed")
-    assert await linkage._read(request(**changes)) == {"items": []}
+    assert (await linkage._read(request(**changes)))["items"] == []
 
 
 async def test_recall_keeps_the_qualification_at_the_end_or_omits_the_whole_record(service, linkage):
